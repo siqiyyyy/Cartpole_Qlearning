@@ -13,15 +13,15 @@ from PIL import Image
 
 # hyperparameters
 W = 4 # number of hidden layer neurons, not used though
-batch_size = 10 # every how many episodes to do a param update?
-sample_size = 500 # the size of each training set
-learning_rate = 1e-2
-gamma = 0.9 # discount factor for reward
+update_period = 10 # every how many episodes to update target network?
+sample_size = 100 # the size of each training set
+learning_rate = 1e-4
+gamma = 0.999 # discount factor for reward
 decay_rate = 0.95 # decay factor 
-resume = True # resume from previous checkpoint?
+resume = False # resume from previous checkpoint?
 render = True
 np.random.seed(2333)
-exploration_rate=0.6
+exploration_rate=0.9
 
 
 env = gym.make('CartPole-v0')
@@ -42,7 +42,7 @@ def getimage(env):
 # Define model:
 class model(nn.Module):
 #TODO: transform the datatype
-    def __init__(self, Width):
+    def __init__(self):
         super(model, self).__init__()
         self.conv1 = nn.Conv2d(1, 1, kernel_size=5, stride=2)#(400-5-1)/2+1=198, (600-5-1)/2+1=298
         self.conv2 = nn.Conv2d(1, 1, kernel_size=5, stride=2)#(198-5-1)/2+1=97, (298-5-1)/2+1=147
@@ -80,53 +80,54 @@ class ReplayMemory(object):
 
 
 
-policyNN=model(W)  #create two instances of model
-targetNN=model(W)
+policyNN=model()  #create two instances of model
+targetNN=model()
 if resume:
     policyNN.load_state_dict(pickle.load(open('save_Qlearning.p', 'rb')))
 targetNN.load_state_dict(policyNN.state_dict())
 targetNN.eval()
 
-optimizer = optim.SGD(policyNN.parameters(), lr=learning_rate, weight_decay=decay_rate)
+optimizer = optim.RMSprop(policyNN.parameters())#, lr=learning_rate, weight_decay=decay_rate)
 memory = ReplayMemory() # stores memory in a batch
-memtmp = ReplayMemory() # stores memory of a single gameplay
 n_episode=0
+n_steps=0
 observation = env.reset()
 state=getimage(env)
 this_input=state
-
+import math
 while True: #Keep playing the game until I stop you
     rdn=np.random.uniform(0,1)
-    if rdn < exploration_rate:
+    if rdn < exploration_rate * math.exp(- n_episode/100):
         action = torch.tensor([np.random.randint(2)]) #take a random action in rare case
     else: 
         action = policyNN(this_input.unsqueeze(0)).max(1)[1].view(1) # otherwise take action with best expected rewards
+    n_steps+=1
     observation, reward, done, info = env.step(action.item()) # take a random action
     last_input = this_input
     this_input = getimage(env) - state
     state = getimage(env)
     reward=torch.tensor([reward])
-    memtmp.push(last_input, action, this_input, reward)
+    memory.push(last_input, action, this_input, reward)
     if done: # finished a game
         n_episode+=1
-        memtmp.discount()
-        print('{} episodes finished with maximum discounted reward {}'.format(n_episode, memtmp.memory[0].reward.item()))
-        memory.append(memtmp)
+        print('{} episodes finished with duration {}'.format(n_episode, n_steps))
+        n_steps=0
         observation = env.reset() # reintialize the env
         state = getimage(env)
         this_input = state
-        memtmp=ReplayMemory()
-        if n_episode % batch_size == 0: # learn from what we played so far
-            state_batch, action_batch, next_state_batch, reward_batch = memory.sample(100)
+        if len(memory) > sample_size: # let's start training
+            state_batch, action_batch, next_state_batch, reward_batch = memory.sample(sample_size)
             current_Q_batch = policyNN(state_batch).gather(1,action_batch)
             expectedQ_batch = targetNN(next_state_batch).max(1)[0].detach().unsqueeze(1) * gamma + reward_batch
             loss = F.smooth_l1_loss(current_Q_batch, expectedQ_batch) # Hubber loss
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            if n_episode % (10*batch_size) ==0:
-                targetNN.load_state_dict(policyNN.state_dict())
-                pickle.dump(policyNN.state_dict(), open('save_Qlearning.p', 'wb'))
+            print('training loss = {}'.format(loss.item()))
+        if n_episode % update_period == 0: # time to update target net
+            targetNN.load_state_dict(policyNN.state_dict())
+        if n_episode % 10*update_period ==0: # save current model in case you want to resume
+            pickle.dump(policyNN.state_dict(), open('save_Qlearning.p', 'wb'))
 
 
 
